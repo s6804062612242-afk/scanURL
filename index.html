@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <title>สแกน QR Code</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;padding:1rem;display:flex;flex-direction:column;align-items:center;gap:1rem}
+    h1{margin:0}
+    video{width:100%;max-width:480px;border-radius:8px;border:1px solid #ddd;background:#000}
+    #controls{display:flex;gap:.5rem;flex-wrap:wrap}
+    button,input[type=file]{padding:.5rem .75rem;font-size:1rem}
+    #output{max-width:480px;word-break:break-word}
+    #canvas{display:none}
+  </style>
+</head>
+<body>
+  <h1>สแกน QR Code</h1>
+  <p>ให้สิทธิ์กล้องแล้ววาง QR ไว้ในกรอบ หรือนำเข้าภาพ</p>
+
+  <video id="video" playsinline autoplay muted></video>
+  <canvas id="canvas"></canvas>
+
+  <div id="controls">
+    <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;">
+      <label for="cameraSelect" style="display:flex;gap:.5rem;align-items:center;">
+        <select id="cameraSelect" aria-label="เลือกกล้อง">
+          <option value="">กล้อง (เริ่มต้น/อัตโนมัติ)</option>
+        </select>
+        <button id="refreshCameras">รีเฟรชกล้อง</button>
+      </label>
+    </div>
+    <button id="startBtn">เริ่มสแกน</button>
+    <button id="stopBtn" disabled>หยุด</button>
+    <input id="fileInput" type="file" accept="image/*">
+    <button id="copyBtn" disabled>คัดลอกผล</button>
+  </div>
+
+  <div id="output">ผลลัพธ์: <span id="outputData">-</span></div>
+
+  <!-- jsQR as fallback -->
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+  <script>
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const fileInput = document.getElementById('fileInput');
+    const outputData = document.getElementById('outputData');
+    const copyBtn = document.getElementById('copyBtn');
+    const cameraSelect = document.getElementById('cameraSelect');
+    const refreshCameras = document.getElementById('refreshCameras');
+
+    let stream = null;
+    let scanning = false;
+    let detector = null;
+
+    async function initDetector(){
+      if('BarcodeDetector' in window){
+        try{ detector = new BarcodeDetector({formats:['qr_code']}); }
+        catch(e){ detector = null; }
+      }
+    }
+
+    async function getCameras(){
+      try{
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoInputs = devices.filter(d => d.kind === 'videoinput');
+        const prev = cameraSelect.value;
+        cameraSelect.innerHTML = '';
+        const defaultOpt = document.createElement('option');
+        defaultOpt.value = '';
+        defaultOpt.textContent = 'กล้อง (เริ่มต้น/อัตโนมัติ)';
+        cameraSelect.appendChild(defaultOpt);
+        videoInputs.forEach((d,i) => {
+          const o = document.createElement('option');
+          o.value = d.deviceId;
+          o.textContent = d.label || `Camera ${i+1}`;
+          cameraSelect.appendChild(o);
+        });
+        if(prev && [...cameraSelect.options].some(o => o.value === prev)) cameraSelect.value = prev;
+      }catch(e){ console.warn('getCameras error', e); }
+    }
+
+    async function startScan(){
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      outputData.textContent = '-';
+      try{
+        if(stream){ stream.getTracks().forEach(t=>t.stop()); stream = null; }
+        const selected = cameraSelect.value;
+        const constraints = selected ? {video:{deviceId:{exact:selected}}, audio:false} : {video:{facingMode:{ideal:'environment'}}, audio:false};
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+        video.srcObject = stream;
+        await video.play();
+        scanning = true;
+        requestAnimationFrame(tick);
+      }catch(err){
+        alert('ไม่สามารถเข้าถึงกล้อง: ' + (err.message || err));
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+      }
+    }
+
+    function stopScan(){
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      scanning = false;
+      if(stream){ stream.getTracks().forEach(t=>t.stop()); stream = null; }
+    }
+
+    async function tick(){
+      if(!scanning) return;
+      if(video.readyState === video.HAVE_ENOUGH_DATA){
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.drawImage(video,0,0,canvas.width,canvas.height);
+        try{
+          if(detector){
+            try{
+              const bitmap = await createImageBitmap(canvas);
+              const barcodes = await detector.detect(bitmap);
+              if(barcodes && barcodes.length){ handleResult(barcodes[0].rawValue); return; }
+            }catch(e){ /* fallback to jsQR below */ }
+          }
+          const imageData = ctx.getImageData(0,0,canvas.width,canvas.height);
+          const code = jsQR(imageData.data,imageData.width,imageData.height,{inversionAttempts:'attemptBoth'});
+          if(code){ handleResult(code.data); return; }
+        }catch(e){ /* ignore */ }
+      }
+      requestAnimationFrame(tick);
+    }
+
+    function handleResult(text){
+      outputData.textContent = text;
+      copyBtn.disabled = false;
+      stopScan();
+      const existing = document.getElementById('outputLink');
+      if(existing) existing.remove();
+      if(/^https?:\/\//i.test(text)){
+        const a = document.createElement('a');
+        a.href = text;
+        a.textContent = 'เปิดลิงก์';
+        a.id = 'outputLink';
+        a.target = '_blank';
+        document.getElementById('output').appendChild(document.createElement('br'));
+        document.getElementById('output').appendChild(a);
+      }
+    }
+
+    fileInput.addEventListener('change', async (e)=>{
+      const f = e.target.files[0];
+      if(!f) return;
+      const img = new Image();
+      img.onload = async function(){
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        ctx.drawImage(img,0,0);
+        try{
+          if(detector){
+            try{
+              const bitmap = await createImageBitmap(canvas);
+              const barcodes = await detector.detect(bitmap);
+              if(barcodes && barcodes.length){ handleResult(barcodes[0].rawValue); return; }
+            }catch(e){ /* fallback to jsQR */ }
+          }
+          const imageData = ctx.getImageData(0,0,canvas.width,canvas.height);
+          const code = jsQR(imageData.data,imageData.width,imageData.height,{inversionAttempts:'attemptBoth'});
+          if(code){ handleResult(code.data); return; }
+          alert('ไม่พบ QR ในภาพ');
+        }catch(err){ alert('เกิดข้อผิดพลาด: ' + (err.message||err)); }
+      };
+      img.onerror = ()=> alert('อ่านไฟล์ภาพไม่สำเร็จ');
+      img.src = URL.createObjectURL(f);
+    });
+
+    copyBtn.addEventListener('click', async ()=>{
+      try{ await navigator.clipboard.writeText(outputData.textContent); alert('คัดลอกแล้ว'); }
+      catch(e){ alert('คัดลอกไม่สำเร็จ: ' + (e.message||e)); }
+    });
+
+    startBtn.addEventListener('click', startScan);
+    stopBtn.addEventListener('click', stopScan);
+    refreshCameras.addEventListener('click', getCameras);
+    if(navigator.mediaDevices && navigator.mediaDevices.addEventListener) navigator.mediaDevices.addEventListener('devicechange', getCameras);
+    window.addEventListener('load', async ()=>{
+      await initDetector();
+      await getCameras();
+    });
+  </script>
+  <script>
+    (function(){
+      const add=(el,cls)=>{ if(!el) return; cls.split(/\s+/).forEach(c=>{ if(c) el.classList.add(c); }); };
+      add(document.body,'min-h-screen p-6 bg-gray-50 flex flex-col items-center gap-4 text-gray-900 font-sans');
+      add(document.querySelector('h1'),'text-2xl font-semibold mb-0');
+      add(document.querySelector('p'),'text-sm text-gray-600');
+      add(document.getElementById('video'),'w-full max-w-md rounded-lg border border-gray-200 bg-black');
+      add(document.getElementById('canvas'),'hidden');
+      add(document.getElementById('controls'),'flex gap-2 flex-wrap items-center');
+      add(document.getElementById('cameraSelect'),'px-3 py-2 border rounded');
+      add(document.getElementById('refreshCameras'),'px-3 py-2 bg-gray-200 rounded hover:bg-gray-300');
+      add(document.getElementById('startBtn'),'px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700');
+      add(document.getElementById('stopBtn'),'px-4 py-2 bg-red-500 text-white rounded disabled:opacity-50');
+      add(document.getElementById('fileInput'),'text-sm');
+      add(document.getElementById('copyBtn'),'px-3 py-2 bg-green-600 text-white rounded disabled:opacity-50');
+      add(document.getElementById('output'),'max-w-md break-words');
+      add(document.getElementById('outputData'),'font-mono');
+    })();
+  </script>
+</body>
+</html>
