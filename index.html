@@ -133,12 +133,15 @@
       requestAnimationFrame(tick);
     }
 
-    function handleResult(text){
+    async function handleResult(text){
       outputData.textContent = text;
       copyBtn.disabled = false;
       stopScan();
       const existing = document.getElementById('outputLink');
       if(existing) existing.remove();
+      const existingVt = document.getElementById('vtResult');
+      if(existingVt) existingVt.remove();
+
       if(/^https?:\/\//i.test(text)){
         const a = document.createElement('a');
         a.href = text;
@@ -147,6 +150,56 @@
         a.target = '_blank';
         document.getElementById('output').appendChild(document.createElement('br'));
         document.getElementById('output').appendChild(a);
+
+        const vtContainer = document.createElement('div');
+        vtContainer.id = 'vtResult';
+        vtContainer.className = 'mt-2 text-sm text-gray-700';
+        vtContainer.textContent = 'กำลังตรวจสอบบน VirusTotal...';
+        document.getElementById('output').appendChild(vtContainer);
+
+        const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+        try{
+          const resp = await fetch('/check', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: text })
+          });
+          if(!resp.ok){
+            vtContainer.textContent = 'ข้อผิดพลาดจากเซิร์ฟเวอร์: ' + resp.status + ' ' + resp.statusText;
+            return;
+          }
+          const j = await resp.json();
+          const verdict = j.verdict || (j.ok ? 'unknown' : 'error');
+          const score = j.score != null ? j.score : '-';
+          let html = `<div>Heuristics: <strong>${esc(verdict)}</strong> (score: ${esc(score)})</div>`;
+
+          if(j.virustotal){
+            if(j.virustotal.enabled === false){
+              html += `<div>VirusTotal: ไม่ได้ตั้งค่า API key บนเซิร์ฟเวอร์</div>`;
+            }else if(j.virustotal.error){
+              html += `<div>VirusTotal error: ${esc(j.virustotal.error)}</div>`;
+            }else if(j.virustotal.data){
+              const attr = j.virustotal.data;
+              const stats = attr.last_analysis_stats || {};
+              const malicious = stats.malicious || 0;
+              const suspicious = stats.suspicious || 0;
+              const harmless = stats.harmless || 0;
+              html += `<div>VirusTotal last_analysis: malicious=${malicious}, suspicious=${suspicious}, harmless=${harmless}</div>`;
+              if(attr.permalink){
+                html += `<div><a href="${esc(attr.permalink)}" target="_blank">ดูบน VirusTotal</a></div>`;
+              }else if(attr.id){
+                html += `<div><a href="https://www.virustotal.com/gui/url/${esc(attr.id)}" target="_blank">ดูบน VirusTotal</a></div>`;
+              }
+            }else{
+              html += `<div>VirusTotal: ${esc(JSON.stringify(j.virustotal))}</div>`;
+            }
+          }
+
+          vtContainer.innerHTML = html;
+        }catch(e){
+          vtContainer.textContent = 'ขัดข้องเมื่อเรียก API: ' + (e.message || e);
+        }
       }
     }
 
