@@ -151,6 +151,15 @@
         document.getElementById('output').appendChild(document.createElement('br'));
         document.getElementById('output').appendChild(a);
 
+        const existingPreview = document.getElementById('previewBtn');
+        if(existingPreview) existingPreview.remove();
+        const previewBtn = document.createElement('button');
+        previewBtn.id = 'previewBtn';
+        previewBtn.textContent = 'Preview (Sandbox)';
+        previewBtn.className = 'ml-2 px-3 py-1 bg-yellow-400 rounded';
+        previewBtn.onclick = function(){ window.open('/preview?url=' + encodeURIComponent(text), '_blank'); };
+        document.getElementById('output').appendChild(previewBtn);
+
         const vtContainer = document.createElement('div');
         vtContainer.id = 'vtResult';
         vtContainer.className = 'mt-2 text-sm text-gray-700';

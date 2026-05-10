@@ -1,6 +1,8 @@
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
+const sanitizeHtml = require('sanitize-html');
+const cheerio = require('cheerio');
 const net = require('net');
 const path = require('path');
 const app = express();
@@ -107,6 +109,110 @@ app.post('/check', async (req, res) => {
     result.virustotal = { error: e.message || String(e) };
   }
   res.json(result);
+});
+
+// --- Sandbox preview endpoint ---
+
+async function fetchWithRedirects(initialUrl, maxHops = 6) {
+  let current = initialUrl;
+  const chain = [current];
+  let finalResponse = null;
+  for (let i = 0; i < maxHops; i++) {
+    try {
+      const resp = await axios.get(current, { maxRedirects: 0, timeout: 8000, validateStatus: s => true, responseType: 'text' });
+      const status = resp.status;
+      if (status >= 300 && status < 400 && resp.headers && resp.headers.location) {
+        const next = new URL(resp.headers.location, current).toString();
+        chain.push(next);
+        current = next;
+        continue;
+      }
+      finalResponse = { url: current, status: status, headers: resp.headers, data: resp.data };
+      break;
+    } catch (err) {
+      if (err && err.response) {
+        const resp = err.response;
+        const status = resp.status;
+        if (status >= 300 && status < 400 && resp.headers && resp.headers.location) {
+          const next = new URL(resp.headers.location, current).toString();
+          chain.push(next);
+          current = next;
+          continue;
+        } else {
+          finalResponse = { url: current, status: status, headers: resp.headers || {}, data: resp.data || '' };
+          break;
+        }
+      } else {
+        throw err;
+      }
+    }
+  }
+  return { chain, finalResponse };
+}
+
+function sanitizeAndRewrite(html, baseUrl) {
+  const $ = cheerio.load(html, { decodeEntities: false });
+  $('script, iframe, object, embed, form, meta[http-equiv], link[rel="stylesheet"], style, noscript').remove();
+  $('*').each((i, el) => {
+    const attribs = el.attribs || {};
+    Object.keys(attribs).forEach((a) => {
+      if (/^on/i.test(a) || a === 'style' || a === 'src' || a === 'srcset' || a === 'background') {
+        $(el).removeAttr(a);
+      }
+    });
+  });
+  $('a').each((i, el) => {
+    const href = $(el).attr('href');
+    if (!href) { $(el).removeAttr('href'); return; }
+    try {
+      const resolved = new URL(href, baseUrl).toString();
+      $(el).attr('href', '/preview?url=' + encodeURIComponent(resolved));
+      $(el).attr('rel', 'noopener noreferrer');
+      $(el).attr('target','_top');
+    } catch (e) {
+      $(el).removeAttr('href');
+    }
+  });
+  $('form').remove();
+  const cleaned = sanitizeHtml($.html(), {
+    allowedTags: sanitizeHtml.defaults.allowedTags.concat(['h1','h2','h3','h4','h5','h6','img','table','thead','tbody','tr','th','td','pre','code']),
+    allowedAttributes: {
+      a: ['href','rel','target'],
+      img: ['alt'],
+      '*': []
+    },
+    transformTags: {
+      'img': function(tagName, attribs) { return { tagName: 'img', attribs: { alt: attribs.alt || '' } }; }
+    }
+  });
+  return cleaned;
+}
+
+app.get('/preview', async (req, res) => {
+  const urlParam = req.query.url;
+  if (!urlParam) return res.status(400).send('Missing url parameter');
+  let normalized;
+  try { normalized = normalizeInput(urlParam); } catch(e) { return res.status(400).send('Invalid url'); }
+  try {
+    const { chain, finalResponse } = await fetchWithRedirects(normalized, 6);
+    if (!finalResponse) {
+      return res.status(502).send('Unable to fetch URL or too many redirects');
+    }
+    const contentType = (finalResponse.headers['content-type'] || '').toLowerCase();
+    const isHtml = contentType.includes('text/html') || /<html/i.test(finalResponse.data || '');
+    const finalUrl = finalResponse.url;
+    const chainHtml = chain.map(u => `<li><a href="/preview?url=${encodeURIComponent(u)}">${u}</a></li>`).join('');
+    let bodyHtml = '<div><em>ไม่สามารถแสดงตัวอย่าง (เนื้อหาไม่ใช่ HTML)</em></div>';
+    if (isHtml) {
+      const sanitized = sanitizeAndRewrite(finalResponse.data || '', finalUrl);
+      bodyHtml = sanitized;
+    }
+    const multiWarning = chain.length > 1 ? `<div style="color:#b91c1c;font-weight:600">คำเตือน: พบการเปลี่ยนเส้นทาง ${chain.length} ชั้น</div>` : '';
+    const page = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sandbox Preview</title></head><body><div style="max-width:900px;margin:0 auto;padding:1rem;font-family:system-ui,Arial,Helvetica,sans-serif"><h2>Sandbox Preview</h2>${multiWarning}<div>Redirect chain:<ul>${chainHtml}</ul></div><div style="border:1px solid #ddd;padding:1rem;margin-top:1rem;background:#fff">${bodyHtml}</div><div style="margin-top:1rem"><a href="${finalUrl}" target="_blank" rel="noopener noreferrer">Open original (external)</a></div></div></body></html>`;
+    res.set('Content-Type','text/html; charset=utf-8').send(page);
+  } catch (e) {
+    res.status(500).send('Error fetching preview: ' + e.message);
+  }
 });
 
 const port = process.env.PORT || 3000;
